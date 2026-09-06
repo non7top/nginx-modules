@@ -243,7 +243,11 @@ jobs:
       - name: Fetch and verify apt-cosign-sign
         env:
           GH_TOKEN: ${{ github.token }}
-          APT_COSIGN_VERSION: '0.3.0'
+          # 0.5.0: apt-cosign-sign's own CLI is unchanged since 0.3.0 (only
+          # apt-cosign-method's client-side policy resolution gained
+          # features between here and there) - tracking latest costs
+          # nothing and picks up any future signing-side fixes.
+          APT_COSIGN_VERSION: '0.5.0'
         run: |
           mkdir -p apt-cosign-bin
           cd apt-cosign-bin

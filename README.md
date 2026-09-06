@@ -41,15 +41,21 @@ independently a complete repo:
 deb [trusted=yes] sigstore+https://raw.githubusercontent.com/non7top/nginx-modules/refs/heads/apt-repo/<jammy|noble|resolute>/ ./
 ```
 
-This needs [apt-cosign](https://github.com/non7top/apt-cosign) installed
-first (`sigstore+https` isn't a scheme apt understands on its own), and a
-policy configured to accept this repo's own build workflow identity:
+This needs [apt-cosign](https://github.com/non7top/apt-cosign) (0.4.0+)
+installed first (`sigstore+https` isn't a scheme apt understands on its
+own). Since this source is GitHub-hosted, no policy is strictly required -
+apt-cosign-method derives `non7top`/`nginx-modules` from the source URL
+itself and trusts any workflow in that repo by default. To narrow that down
+to just the workflow that actually produces these releases (recommended -
+it's the difference between "trust this whole repo" and "trust this one
+build"), configure:
 
 ```
-Acquire::sigstore::Enforce::Repo::Owner "non7top";
-Acquire::sigstore::Enforce::Repo::Name "nginx-modules";
 Acquire::sigstore::Enforce::Repo::Pipeline "build-nginx-vts.yml";
 ```
+
+(Consuming this alongside apt-cosign's own demo repo needs named
+`Sources::` blocks instead, one per repo - see that project's README.)
 
 `[trusted=yes]` tells apt to skip its own GPG check - there's no
 `Release.gpg` or inline-signed `InRelease` here, the sigstore bundle
