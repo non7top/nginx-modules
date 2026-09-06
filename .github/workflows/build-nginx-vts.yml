@@ -211,6 +211,15 @@ jobs:
   # a one-off .deb download - the "real apt repo" follow-up the README used
   # to describe as not-yet-existing, now that apt-cosign exists to do the
   # consuming-side verification.
+  #
+  # Uses apt-cosign's own fetch-apt-cosign-sign/publish-apt-repo composite
+  # actions rather than the hand-rolled fetch/stage/sign/publish steps this
+  # job used to have: apt-cosign extracted those out of its own release.yml
+  # once this repo became a second real consumer of the same mechanism (see
+  # that project's release.yml and .github/actions/publish-apt-repo/
+  # action.yml, whose codename-pattern input exists specifically to cover
+  # this repo's per-codename case), so there's no reason to keep
+  # maintaining a local copy of logic upstream now owns and tests.
   publish-apt-repo:
     needs: build
     runs-on: ubuntu-latest
@@ -228,59 +237,27 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - uses: sigstore/cosign-installer@v3
-
-      - name: Install dpkg-dev (dpkg-scanpackages)
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends dpkg-dev
-
-      # apt-cosign-sign isn't built here (this repo has no Go toolchain) -
-      # fetch the pinned upstream .deb and verify it against non7top/apt-
-      # cosign's own release workflow identity before trusting it to sign
-      # anything, the same bootstrap step that repo's own README documents
-      # for installing apt-cosign itself the first time.
+      # This repo has no Go toolchain to build apt-cosign-sign from source -
+      # fetches the pinned upstream .deb, verifies it against apt-cosign's
+      # own release workflow identity, and extracts the binary.
       - name: Fetch and verify apt-cosign-sign
-        env:
-          GH_TOKEN: ${{ github.token }}
-          # 0.5.0: apt-cosign-sign's own CLI is unchanged since 0.3.0 (only
-          # apt-cosign-method's client-side policy resolution gained
-          # features between here and there) - tracking latest costs
-          # nothing and picks up any future signing-side fixes.
-          APT_COSIGN_VERSION: '0.5.0'
-        run: |
-          mkdir -p apt-cosign-bin
-          cd apt-cosign-bin
-          gh release download "v${APT_COSIGN_VERSION}" \
-            --repo non7top/apt-cosign \
-            --pattern 'apt-cosign_*_amd64.deb*'
-          cosign verify-blob \
-            --bundle "apt-cosign_${APT_COSIGN_VERSION}_amd64.deb.sigstore" \
-            --certificate-identity-regexp '^https://github\.com/non7top/apt-cosign/\.github/workflows/release\.yml@.+$' \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            "apt-cosign_${APT_COSIGN_VERSION}_amd64.deb"
-          dpkg-deb -x "apt-cosign_${APT_COSIGN_VERSION}_amd64.deb" extracted
-          cp extracted/usr/bin/apt-cosign-sign ../apt-cosign-sign
-          chmod +x ../apt-cosign-sign
+        id: apt-cosign-sign
+        uses: non7top/apt-cosign/.github/actions/fetch-apt-cosign-sign@v0.6.0
+        with:
+          version: '0.6.0'
+          github-token: ${{ github.token }}
 
-      - name: Build, package, and stage the flat apt repo
-        run: ./debian/build-apt-repo.sh
-
-      - name: Sign the apt repo (keyless, GitHub Actions OIDC)
-        env:
-          APT_COSIGN_SIGN: ${{ github.workspace }}/apt-cosign-sign
-        run: ./debian/sign-apt-repo.sh
-
-      # apt-repo is published as a single, force-pushed commit (like a
-      # gh-pages branch) rather than accumulating history: it's regenerated
-      # whole on every release, and nothing about its own git history is
-      # meaningful (the real history lives on main).
-      - name: Publish to the apt-repo branch
-        working-directory: apt-repo
-        run: |
-          git init -q
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -q -m "apt-repo: nginx-module-vts ${{ inputs.vts_ref }}-${{ inputs.pkg_revision }}"
-          git push --force "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:refs/heads/apt-repo
+      # Stages a flat apt repo per OS codename (jammy/noble/resolute builds
+      # of the same version aren't byte-identical - different nginx source,
+      # different Depends - so they can't share one Packages index), signs
+      # every InRelease/Packages/.deb with apt-cosign-sign, and
+      # force-publishes to the apt-repo branch.
+      - name: Stage, sign, and publish the apt repo
+        uses: non7top/apt-cosign/.github/actions/publish-apt-repo@v0.6.0
+        with:
+          sign-bin: ${{ steps.apt-cosign-sign.outputs.bin-path }}
+          codename-pattern: 's/_amd64\.deb$//; s/.*_//'
+          origin: nginx-modules
+          description: "nginx-module-vts prebuilt repo for Ubuntu %CODENAME% (sigstore-verified, no GPG signature - see README)"
+          commit-message: "apt-repo: nginx-module-vts ${{ inputs.vts_ref }}-${{ inputs.pkg_revision }}"
+          github-token: ${{ secrets.GITHUB_TOKEN }}
