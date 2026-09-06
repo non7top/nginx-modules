@@ -194,10 +194,70 @@ jobs:
           gh release create "$tag" dist/*.deb dist/*.cosign.bundle \
             --repo "$GITHUB_REPOSITORY" \
             --title "nginx-module-vts ${{ inputs.vts_ref }}-${{ inputs.pkg_revision }}" \
-            --notes "Prebuilt .deb for jammy/noble/resolute - see wr-salt-new's ispconfig3/vts.sls for how these get consumed (downloaded directly and installed via Salt's pkg.installed, pinned by sha256 - not yet a real apt repo).
+            --notes "Prebuilt .deb for jammy/noble/resolute - see wr-salt-new's ispconfig3/vts.sls for how these get consumed (downloaded directly and installed via Salt's pkg.installed, pinned by sha256).
 
           Each .deb has a matching .cosign.bundle - verify with:
               cosign verify-blob --bundle FILE.deb.cosign.bundle \\
                 --certificate-identity-regexp 'https://github.com/${{ github.repository }}/.github/workflows/build-nginx-vts.yml@.*' \\
                 --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
-                FILE.deb"
+                FILE.deb
+
+          A real apt repo (per-codename, sigstore-signed, no GPG) is also published on the apt-repo branch - see the README's 'Installing via apt' section."
+
+  # Dogfoods non7top/apt-cosign on this repo's own release: publishes a real
+  # flat apt repo per OS codename (see README's "Installing via apt"), signed
+  # with apt-cosign-sign instead of raw cosign sign-blob, so a node can
+  # consume it through apt itself via a sigstore+https:// source rather than
+  # a one-off .deb download - the "real apt repo" follow-up the README used
+  # to describe as not-yet-existing, now that apt-cosign exists to do the
+  # consuming-side verification.
+  #
+  # Uses apt-cosign's own fetch-apt-cosign-sign/publish-apt-repo composite
+  # actions rather than the hand-rolled fetch/stage/sign/publish steps this
+  # job used to have: apt-cosign extracted those out of its own release.yml
+  # once this repo became a second real consumer of the same mechanism (see
+  # that project's release.yml and .github/actions/publish-apt-repo/
+  # action.yml, whose codename-pattern input exists specifically to cover
+  # this repo's per-codename case), so there's no reason to keep
+  # maintaining a local copy of logic upstream now owns and tests.
+  publish-apt-repo:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # Keyless apt-cosign-sign signing below exchanges this job's OIDC
+      # token for a short-lived Fulcio cert - no signing key ever touches
+      # this repo, same as the release job's cosign step above.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # This repo has no Go toolchain to build apt-cosign-sign from source -
+      # fetches the pinned upstream .deb, verifies it against apt-cosign's
+      # own release workflow identity, and extracts the binary.
+      - name: Fetch and verify apt-cosign-sign
+        id: apt-cosign-sign
+        uses: non7top/apt-cosign/.github/actions/fetch-apt-cosign-sign@v0.6.0
+        with:
+          version: '0.6.0'
+          github-token: ${{ github.token }}
+
+      # Stages a flat apt repo per OS codename (jammy/noble/resolute builds
+      # of the same version aren't byte-identical - different nginx source,
+      # different Depends - so they can't share one Packages index), signs
+      # every InRelease/Packages/.deb with apt-cosign-sign, and
+      # force-publishes to the apt-repo branch.
+      - name: Stage, sign, and publish the apt repo
+        uses: non7top/apt-cosign/.github/actions/publish-apt-repo@v0.6.0
+        with:
+          sign-bin: ${{ steps.apt-cosign-sign.outputs.bin-path }}
+          codename-pattern: 's/_amd64\.deb$//; s/.*_//'
+          origin: nginx-modules
+          description: "nginx-module-vts prebuilt repo for Ubuntu %CODENAME% (sigstore-verified, no GPG signature - see README)"
+          commit-message: "apt-repo: nginx-module-vts ${{ inputs.vts_ref }}-${{ inputs.pkg_revision }}"
+          github-token: ${{ secrets.GITHUB_TOKEN }}
