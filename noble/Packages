@@ -1,0 +1,15 @@
+Package: nginx-module-vts
+Version: 0.2.7-4
+Architecture: amd64
+Maintainer: non7top <noreply@github.com>
+Depends: nginx-core
+Filename: ./nginx-module-vts_0.2.7-4_noble_amd64.deb
+Size: 218298
+MD5sum: 848f18e22709b731e26c7c3945587972
+SHA1: 74cb617f55b5d8d9730f693ac8766c2759826212
+SHA256: 64389e6ab05455f29bb971626e4e3485179a1c02b2d0dbcb3ecd01a3f9862eec
+Section: httpd
+Priority: optional
+Description: nginx virtual host traffic status module (prebuilt, noble)
+ Prebuilt vozlt/nginx-module-vts v0.2.7 for Ubuntu noble, built via non7top/nginx-modules GitHub Actions.
+

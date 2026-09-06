@@ -1,0 +1,10 @@
+Origin: nginx-modules
+Label: nginx-modules
+Suite: stable
+Codename: noble
+Architectures: amd64
+Components: main
+Description: nginx-module-vts prebuilt repo for Ubuntu noble (sigstore-verified, no GPG signature - see README)
+Date: Sun, 06 Sep 2026 23:51:31 +0000
+SHA256:
+ 55b8f112a271ee57813f9931957fb97bff7f776c5e6443333a75403683cd054d 564 Packages
