@@ -1,0 +1,140 @@
+name: Build nginx-module-vts
+
+# Manual only - this only needs rebuilding when the pinned nginx-module-vts
+# version bumps, or when a target OS release's nginx epoch changes enough
+# that --with-compat no longer covers it (a new major/minor, not a routine
+# security point-release - see ispconfig3/vts.sls for why that distinction
+# matters). Not on every push: nothing here depends on this repo's own
+# code changing.
+on:
+  workflow_dispatch:
+    inputs:
+      vts_ref:
+        description: 'nginx-module-vts git tag to build (e.g. v0.2.7)'
+        required: true
+        default: 'v0.2.7'
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          # jammy has no nginx-dev package (see ispconfig3/vts.sls) - builds
+          # against nginx.org's own upstream source instead, relying on
+          # --with-compat for ABI compatibility with the distro's patched
+          # binary, same reasoning as the noble/resolute path below.
+          - runner: ubuntu-22.04
+            codename: jammy
+            nginx_version: '1.18.0'
+            nginx_sha256: '4c373e7ab5bf91d34a4f11a0c9496561061ba5eee6020db272a17a7228d35f99'
+          - runner: ubuntu-24.04
+            codename: noble
+          - runner: ubuntu-26.04
+            codename: resolute
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Fetch and verify nginx-module-vts source
+        run: |
+          curl -fsSL -o vts.tar.gz \
+            "https://github.com/vozlt/nginx-module-vts/archive/refs/tags/${{ inputs.vts_ref }}.tar.gz"
+          sha256sum vts.tar.gz
+          tar xzf vts.tar.gz
+          mv nginx-module-vts-* nginx-module-vts
+
+      # --- jammy: build against nginx.org's own source ---
+      - name: (jammy) Install build toolchain
+        if: matrix.codename == 'jammy'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libpcre3-dev zlib1g-dev libssl-dev
+
+      - name: (jammy) Fetch and verify nginx source
+        if: matrix.codename == 'jammy'
+        run: |
+          curl -fsSL -o nginx.tar.gz "https://nginx.org/download/nginx-${{ matrix.nginx_version }}.tar.gz"
+          echo "${{ matrix.nginx_sha256 }}  nginx.tar.gz" | sha256sum -c -
+          tar xzf nginx.tar.gz
+
+      - name: (jammy) Configure and build the module
+        if: matrix.codename == 'jammy'
+        run: |
+          cd nginx-${{ matrix.nginx_version }}
+          ./configure --with-compat --add-dynamic-module=../nginx-module-vts
+          make modules
+          cp objs/ngx_http_vhost_traffic_status_module.so \
+            ../ngx_http_vhost_traffic_status_module-jammy.so
+
+      # --- noble/resolute: build against nginx-dev's own matching source ---
+      - name: (noble/resolute) Install build toolchain
+        if: matrix.codename != 'jammy'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            nginx-core nginx-dev build-essential libpcre3-dev zlib1g-dev libssl-dev
+
+      - name: (noble/resolute) Configure and build the module
+        if: matrix.codename != 'jammy'
+        run: |
+          workspace="$GITHUB_WORKSPACE"
+          cd /usr/share/nginx/src
+          . ./conf_flags
+          ./configure "${NGX_CONF_FLAGS[@]}" \
+            --add-dynamic-module="$workspace/nginx-module-vts" \
+            --builddir="$workspace/objs"
+          make -f "$workspace/objs/Makefile" -C /usr/share/nginx/src modules
+          cp "$workspace/objs/ngx_http_vhost_traffic_status_module.so" \
+            "$workspace/ngx_http_vhost_traffic_status_module-${{ matrix.codename }}.so"
+
+      - name: Report the nginx version this was actually built against
+        run: dpkg-query -W -f='${Version}\n' nginx-core
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vts-${{ matrix.codename }}
+          path: ngx_http_vhost_traffic_status_module-${{ matrix.codename }}.so
+          retention-days: 7
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # Keyless signing: cosign gets a short-lived cert from Sigstore's CA
+      # bound to this workflow's own OIDC identity (repo + ref + workflow
+      # path) - no private key to generate, store, or rotate. id-token:
+      # write is what lets the job request that OIDC token in the first
+      # place.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: sha256 of every built module, for pinning in ispconfig3/vts.sls
+        run: sha256sum dist/*.so
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign every built module (keyless)
+        run: |
+          for so in dist/*.so; do
+            cosign sign-blob --yes --bundle "$so.cosign.bundle" "$so"
+          done
+
+      - name: Publish as a GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="nginx-module-vts-${{ inputs.vts_ref }}"
+          gh release create "$tag" dist/*.so dist/*.cosign.bundle \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "nginx-module-vts ${{ inputs.vts_ref }}" \
+            --notes "Prebuilt for jammy/noble/resolute - see wr-salt-new's ispconfig3/vts.sls for how these get consumed.
+
+          Each .so has a matching .cosign.bundle - verify with:
+              cosign verify-blob --bundle FILE.so.cosign.bundle \\
+                --certificate-identity-regexp 'https://github.com/${{ github.repository }}/.github/workflows/build-nginx-vts.yml@.*' \\
+                --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
+                FILE.so"
