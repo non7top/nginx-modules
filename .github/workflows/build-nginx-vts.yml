@@ -3,9 +3,9 @@ name: Build nginx-module-vts
 # Manual only - this only needs rebuilding when the pinned nginx-module-vts
 # version bumps, or when a target OS release's nginx epoch changes enough
 # that --with-compat no longer covers it (a new major/minor, not a routine
-# security point-release - see ispconfig3/vts.sls for why that distinction
-# matters). Not on every push: nothing here depends on this repo's own
-# code changing.
+# security point-release - see wr-salt-new's ispconfig3/vts.sls for why
+# that distinction matters). Not on every push: nothing here depends on
+# this repo's own code changing.
 on:
   workflow_dispatch:
     inputs:
@@ -13,6 +13,10 @@ on:
         description: 'nginx-module-vts git tag to build (e.g. v0.2.7)'
         required: true
         default: 'v0.2.7'
+      pkg_revision:
+        description: 'Debian package revision (the -N after the version)'
+        required: true
+        default: '1'
 
 jobs:
   build:
@@ -62,8 +66,8 @@ jobs:
           cd nginx-${{ matrix.nginx_version }}
           ./configure --with-compat --add-dynamic-module=../nginx-module-vts
           make modules
-          cp objs/ngx_http_vhost_traffic_status_module.so \
-            ../ngx_http_vhost_traffic_status_module-jammy.so
+          mkdir -p "$GITHUB_WORKSPACE/built"
+          cp objs/ngx_http_vhost_traffic_status_module.so "$GITHUB_WORKSPACE/built/"
 
       # --- noble/resolute: build against nginx-dev's own matching source ---
       - name: (noble/resolute) Install build toolchain
@@ -83,16 +87,67 @@ jobs:
             --add-dynamic-module="$workspace/nginx-module-vts" \
             --builddir="$workspace/objs"
           make -f "$workspace/objs/Makefile" -C /usr/share/nginx/src modules
-          cp "$workspace/objs/ngx_http_vhost_traffic_status_module.so" \
-            "$workspace/ngx_http_vhost_traffic_status_module-${{ matrix.codename }}.so"
+          mkdir -p "$workspace/built"
+          cp "$workspace/objs/ngx_http_vhost_traffic_status_module.so" "$workspace/built/"
 
       - name: Report the nginx version this was actually built against
         run: dpkg-query -W -f='${Version}\n' nginx-core
 
+      # dpkg-deb --build directly, not the full nginx_mod debhelper
+      # buildsystem nginx's own source package uses for its packaged
+      # modules (debian/debhelper/nginx_mod.pm) - that expects the module
+      # source to ship its own debian/ packaging, which vozlt/nginx-
+      # module-vts doesn't, and reproducing it here would mean authoring
+      # that packaging from scratch for one module. This is a real .deb
+      # (dpkg -l/-i/-r all work on it, confirmed), just built the direct
+      # way rather than through that machinery.
+      #
+      # Straight into /etc/nginx/modules-enabled rather than the
+      # available+enabled symlink split real distro module packages use:
+      # that split exists so a sysadmin can disable a module without
+      # uninstalling it, which nothing here ever needs to do - this
+      # module is either installed and wanted, or not installed at all.
+      - name: Package as a .deb
+        run: |
+          version="${{ inputs.vts_ref }}"
+          version="${version#v}"
+          pkg_version="${version}-${{ inputs.pkg_revision }}"
+          deb_name="nginx-module-vts_${pkg_version}_${{ matrix.codename }}_amd64.deb"
+
+          mkdir -p pkgroot/usr/lib/nginx/modules
+          mkdir -p pkgroot/etc/nginx/modules-enabled
+          mkdir -p pkgroot/DEBIAN
+          cp built/ngx_http_vhost_traffic_status_module.so pkgroot/usr/lib/nginx/modules/
+          echo 'load_module modules/ngx_http_vhost_traffic_status_module.so;' \
+            > pkgroot/etc/nginx/modules-enabled/50-mod-http-vhost-traffic-status.conf
+
+          # Heredoc body is flush with this script's own base indentation
+          # (not further indented for visual nesting) - a heredoc doesn't
+          # strip leading whitespace the way YAML's block scalar strips
+          # its own, so extra indentation here would land literally in
+          # the control file and break its format. Confirmed by testing
+          # a mismatched version first: it does.
+          cat > pkgroot/DEBIAN/control <<EOF
+          Package: nginx-module-vts
+          Version: ${pkg_version}
+          Architecture: amd64
+          Maintainer: non7top <noreply@github.com>
+          Depends: nginx-core
+          Section: httpd
+          Priority: optional
+          Description: nginx virtual host traffic status module (prebuilt, ${{ matrix.codename }})
+           Prebuilt vozlt/nginx-module-vts ${{ inputs.vts_ref }} for Ubuntu ${{ matrix.codename }}, built via non7top/nginx-modules GitHub Actions.
+          EOF
+
+          dpkg-deb --build --root-owner-group pkgroot "$deb_name"
+          dpkg-deb -I "$deb_name"
+          mkdir -p dist
+          mv "$deb_name" dist/
+
       - uses: actions/upload-artifact@v4
         with:
           name: vts-${{ matrix.codename }}
-          path: ngx_http_vhost_traffic_status_module-${{ matrix.codename }}.so
+          path: dist/*.deb
           retention-days: 7
 
   release:
@@ -112,29 +167,31 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: sha256 of every built module, for pinning in ispconfig3/vts.sls
-        run: sha256sum dist/*.so
+      - name: sha256 of every built package, for pinning in ispconfig3/vts.sls
+        run: sha256sum dist/*.deb
 
       - uses: sigstore/cosign-installer@v3
 
-      - name: Sign every built module (keyless)
+      - name: Sign every built package (keyless)
         run: |
-          for so in dist/*.so; do
-            cosign sign-blob --yes --bundle "$so.cosign.bundle" "$so"
+          for deb in dist/*.deb; do
+            cosign sign-blob --yes --bundle "$deb.cosign.bundle" "$deb"
           done
 
       - name: Publish as a GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="nginx-module-vts-${{ inputs.vts_ref }}"
-          gh release create "$tag" dist/*.so dist/*.cosign.bundle \
+          version="${{ inputs.vts_ref }}"
+          version="${version#v}"
+          tag="nginx-module-vts-${version}-${{ inputs.pkg_revision }}"
+          gh release create "$tag" dist/*.deb dist/*.cosign.bundle \
             --repo "$GITHUB_REPOSITORY" \
-            --title "nginx-module-vts ${{ inputs.vts_ref }}" \
-            --notes "Prebuilt for jammy/noble/resolute - see wr-salt-new's ispconfig3/vts.sls for how these get consumed.
+            --title "nginx-module-vts ${{ inputs.vts_ref }}-${{ inputs.pkg_revision }}" \
+            --notes "Prebuilt .deb for jammy/noble/resolute - see wr-salt-new's ispconfig3/vts.sls for how these get consumed (downloaded directly and installed via Salt's pkg.installed, pinned by sha256 - not yet a real apt repo).
 
-          Each .so has a matching .cosign.bundle - verify with:
-              cosign verify-blob --bundle FILE.so.cosign.bundle \\
+          Each .deb has a matching .cosign.bundle - verify with:
+              cosign verify-blob --bundle FILE.deb.cosign.bundle \\
                 --certificate-identity-regexp 'https://github.com/${{ github.repository }}/.github/workflows/build-nginx-vts.yml@.*' \\
                 --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
-                FILE.so"
+                FILE.deb"
