@@ -70,12 +70,18 @@ jobs:
           cp objs/ngx_http_vhost_traffic_status_module.so "$GITHUB_WORKSPACE/built/"
 
       # --- noble/resolute: build against nginx-dev's own matching source ---
+      # libpcre2-dev, not libpcre3-dev: confirmed via ldd against the real
+      # nginx-core binary on both releases that it links libpcre2-8, not
+      # libpcre1 - noble still happens to carry an installable libpcre3-dev
+      # (harmless if present, unused), but resolute dropped it entirely
+      # (E: Package 'libpcre3-dev' has no installation candidate), which is
+      # what broke this job's first real run.
       - name: (noble/resolute) Install build toolchain
         if: matrix.codename != 'jammy'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            nginx-core nginx-dev build-essential libpcre3-dev zlib1g-dev libssl-dev
+            nginx-core nginx-dev build-essential libpcre2-dev zlib1g-dev libssl-dev
 
       - name: (noble/resolute) Configure and build the module
         if: matrix.codename != 'jammy'
