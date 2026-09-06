@@ -194,10 +194,89 @@ jobs:
           gh release create "$tag" dist/*.deb dist/*.cosign.bundle \
             --repo "$GITHUB_REPOSITORY" \
             --title "nginx-module-vts ${{ inputs.vts_ref }}-${{ inputs.pkg_revision }}" \
-            --notes "Prebuilt .deb for jammy/noble/resolute - see wr-salt-new's ispconfig3/vts.sls for how these get consumed (downloaded directly and installed via Salt's pkg.installed, pinned by sha256 - not yet a real apt repo).
+            --notes "Prebuilt .deb for jammy/noble/resolute - see wr-salt-new's ispconfig3/vts.sls for how these get consumed (downloaded directly and installed via Salt's pkg.installed, pinned by sha256).
 
           Each .deb has a matching .cosign.bundle - verify with:
               cosign verify-blob --bundle FILE.deb.cosign.bundle \\
                 --certificate-identity-regexp 'https://github.com/${{ github.repository }}/.github/workflows/build-nginx-vts.yml@.*' \\
                 --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
-                FILE.deb"
+                FILE.deb
+
+          A real apt repo (per-codename, sigstore-signed, no GPG) is also published on the apt-repo branch - see the README's 'Installing via apt' section."
+
+  # Dogfoods non7top/apt-cosign on this repo's own release: publishes a real
+  # flat apt repo per OS codename (see README's "Installing via apt"), signed
+  # with apt-cosign-sign instead of raw cosign sign-blob, so a node can
+  # consume it through apt itself via a sigstore+https:// source rather than
+  # a one-off .deb download - the "real apt repo" follow-up the README used
+  # to describe as not-yet-existing, now that apt-cosign exists to do the
+  # consuming-side verification.
+  publish-apt-repo:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # Keyless apt-cosign-sign signing below exchanges this job's OIDC
+      # token for a short-lived Fulcio cert - no signing key ever touches
+      # this repo, same as the release job's cosign step above.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Install dpkg-dev (dpkg-scanpackages)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends dpkg-dev
+
+      # apt-cosign-sign isn't built here (this repo has no Go toolchain) -
+      # fetch the pinned upstream .deb and verify it against non7top/apt-
+      # cosign's own release workflow identity before trusting it to sign
+      # anything, the same bootstrap step that repo's own README documents
+      # for installing apt-cosign itself the first time.
+      - name: Fetch and verify apt-cosign-sign
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APT_COSIGN_VERSION: '0.3.0'
+        run: |
+          mkdir -p apt-cosign-bin
+          cd apt-cosign-bin
+          gh release download "v${APT_COSIGN_VERSION}" \
+            --repo non7top/apt-cosign \
+            --pattern 'apt-cosign_*_amd64.deb*'
+          cosign verify-blob \
+            --bundle "apt-cosign_${APT_COSIGN_VERSION}_amd64.deb.sigstore" \
+            --certificate-identity-regexp '^https://github\.com/non7top/apt-cosign/\.github/workflows/release\.yml@.+$' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "apt-cosign_${APT_COSIGN_VERSION}_amd64.deb"
+          dpkg-deb -x "apt-cosign_${APT_COSIGN_VERSION}_amd64.deb" extracted
+          cp extracted/usr/bin/apt-cosign-sign ../apt-cosign-sign
+          chmod +x ../apt-cosign-sign
+
+      - name: Build, package, and stage the flat apt repo
+        run: ./debian/build-apt-repo.sh
+
+      - name: Sign the apt repo (keyless, GitHub Actions OIDC)
+        env:
+          APT_COSIGN_SIGN: ${{ github.workspace }}/apt-cosign-sign
+        run: ./debian/sign-apt-repo.sh
+
+      # apt-repo is published as a single, force-pushed commit (like a
+      # gh-pages branch) rather than accumulating history: it's regenerated
+      # whole on every release, and nothing about its own git history is
+      # meaningful (the real history lives on main).
+      - name: Publish to the apt-repo branch
+        working-directory: apt-repo
+        run: |
+          git init -q
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "apt-repo: nginx-module-vts ${{ inputs.vts_ref }}-${{ inputs.pkg_revision }}"
+          git push --force "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:refs/heads/apt-repo

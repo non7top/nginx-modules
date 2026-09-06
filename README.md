@@ -1,6 +1,6 @@
 # nginx-modules
 
-Prebuilt nginx dynamic modules for the wr0.ru fleet (jammy/22.04, noble/24.04, resolute/26.04), packaged as real `.deb`s and built via GitHub Actions. Consumed by [non7top/wr-salt-new](https://github.com/non7top/wr-salt-new) (`ispconfig3/vts.sls`), which downloads each release's `.deb` directly (pinned by sha256) and installs it via Salt's `pkg.installed` - not yet a real apt repo, that's a planned follow-up once repo-level cosign verification exists on the consuming side.
+Prebuilt nginx dynamic modules for the wr0.ru fleet (jammy/22.04, noble/24.04, resolute/26.04), packaged as real `.deb`s and built via GitHub Actions. Consumed by [non7top/wr-salt-new](https://github.com/non7top/wr-salt-new) (`ispconfig3/vts.sls`), which downloads each release's `.deb` directly (pinned by sha256) and installs it via Salt's `pkg.installed`. A real apt repo is also published per release (see "Installing via apt" below), for anything that would rather add a source and run `apt-get install` than track sha256 pins by hand.
 
 ## Why this exists
 
@@ -25,3 +25,32 @@ cosign verify-blob --bundle FILE.deb.cosign.bundle \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   FILE.deb
 ```
+
+## Installing via apt
+
+Every release also publishes a real, flat apt repo (`deb URL/ ./`, no
+`dists/` hierarchy) on the `apt-repo` branch - built and signed the same way
+[non7top/apt-cosign](https://github.com/non7top/apt-cosign) publishes its own
+demo repo, using that project's `apt-cosign-sign` instead of raw `cosign
+sign-blob`. Because jammy/noble/resolute builds of the same version aren't
+byte-identical (different nginx source, different `Depends`), they can't
+share one flat Packages index - each codename gets its own subdirectory,
+independently a complete repo:
+
+```
+deb [trusted=yes] sigstore+https://raw.githubusercontent.com/non7top/nginx-modules/refs/heads/apt-repo/<jammy|noble|resolute>/ ./
+```
+
+This needs [apt-cosign](https://github.com/non7top/apt-cosign) installed
+first (`sigstore+https` isn't a scheme apt understands on its own), and a
+policy configured to accept this repo's own build workflow identity:
+
+```
+Acquire::sigstore::Enforce::Repo::Owner "non7top";
+Acquire::sigstore::Enforce::Repo::Name "nginx-modules";
+Acquire::sigstore::Enforce::Repo::Pipeline "build-nginx-vts.yml";
+```
+
+`[trusted=yes]` tells apt to skip its own GPG check - there's no
+`Release.gpg` or inline-signed `InRelease` here, the sigstore bundle
+`apt-cosign-method` fetches alongside each file *is* the trust mechanism.
