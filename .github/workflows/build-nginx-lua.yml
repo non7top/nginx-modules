@@ -1,0 +1,296 @@
+name: Build nginx-module-lua
+
+# jammy/22.04 only. noble/24.04 and resolute/26.04 already have a working
+# equivalent in Ubuntu's own archive - libnginx-mod-http-lua (Depends:
+# libnginx-mod-http-ndk, lua-resty-core, the distro's libluajit-5.1-2
+# runtime), all real .debs, confirmed via apt-cache policy against all
+# three releases. jammy has none of it: same gap as nginx-dev's absence
+# there for nginx-module-vts. Nodes on noble/resolute should just
+# `apt-get install libnginx-mod-http-lua` directly - this workflow and its
+# apt-repo-lua branch exist only to cover jammy.
+#
+# Manual only, same reasoning as build-nginx-vts.yml: nothing here depends
+# on this repo's own code changing, only on the pinned upstream refs below.
+on:
+  workflow_dispatch:
+    inputs:
+      ndk_ref:
+        description: 'ngx_devel_kit (NDK) git tag to build'
+        required: true
+        default: 'v0.3.4'
+      lua_module_ref:
+        description: 'openresty/lua-nginx-module git tag to build'
+        required: true
+        default: 'v0.10.31'
+      # lua-resty-core hard-checks the exact ngx_http_lua_module version at
+      # nginx startup (lib/resty/core/base.lua's `ngx_lua_version ~= NNNNN`
+      # check - not a >=, an exact match) and refuses to load on a
+      # mismatch. v0.1.34rc3 is the tag whose check matches
+      # lua_module_ref's default (v0.10.31) - confirmed by reading that
+      # exact line at that tag, not assumed from the version number alone.
+      # An RC tag is the correct choice here, not a stand-in for one: the
+      # last plain (non-RC) release, v0.1.32, only matches
+      # lua-nginx-module 0.10.29.
+      #
+      # Bumping ONLY one of ndk_ref/lua_module_ref/resty_core_ref away from
+      # these defaults risks exactly that mismatch - nginx will fail to
+      # start with "ngx_http_lua_module X required" if resty_core_ref
+      # isn't updated to match. Verified end to end (real distro nginx,
+      # not just configure/compile) with this exact set of versions before
+      # they became the defaults here.
+      resty_core_ref:
+        description: 'openresty/lua-resty-core git tag to build - MUST match lua_module_ref (see comment above)'
+        required: true
+        default: 'v0.1.34rc3'
+      resty_lrucache_ref:
+        description: 'openresty/lua-resty-lrucache git tag to build'
+        required: true
+        default: 'v0.15'
+      pkg_revision:
+        description: 'Debian package revision (the -N after the version)'
+        required: true
+        default: '1'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install build toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libpcre3-dev zlib1g-dev libssl-dev \
+            libluajit-5.1-dev pkg-config
+
+      - name: Fetch and verify nginx source
+        env:
+          NGINX_VERSION: '1.18.0'
+          NGINX_SHA256: '4c373e7ab5bf91d34a4f11a0c9496561061ba5eee6020db272a17a7228d35f99'
+        run: |
+          curl -fsSL -o nginx.tar.gz "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+          echo "${NGINX_SHA256}  nginx.tar.gz" | sha256sum -c -
+          tar xzf nginx.tar.gz
+          mv "nginx-${NGINX_VERSION}" nginx-src
+
+      - name: Fetch ngx_devel_kit, lua-nginx-module, lua-resty-core, lua-resty-lrucache
+        run: |
+          curl -fsSL -o ndk.tar.gz "https://github.com/simplresty/ngx_devel_kit/archive/refs/tags/${{ inputs.ndk_ref }}.tar.gz"
+          curl -fsSL -o lua-module.tar.gz "https://github.com/openresty/lua-nginx-module/archive/refs/tags/${{ inputs.lua_module_ref }}.tar.gz"
+          curl -fsSL -o resty-core.tar.gz "https://github.com/openresty/lua-resty-core/archive/refs/tags/${{ inputs.resty_core_ref }}.tar.gz"
+          curl -fsSL -o resty-lrucache.tar.gz "https://github.com/openresty/lua-resty-lrucache/archive/refs/tags/${{ inputs.resty_lrucache_ref }}.tar.gz"
+          tar xzf ndk.tar.gz && mv ngx_devel_kit-* ngx_devel_kit
+          tar xzf lua-module.tar.gz && mv lua-nginx-module-* lua-nginx-module
+          tar xzf resty-core.tar.gz && mv lua-resty-core-* lua-resty-core
+          tar xzf resty-lrucache.tar.gz && mv lua-resty-lrucache-* lua-resty-lrucache
+
+      # --with-ld-opt=-Wl,-rpath,...: without it the built .so can't find
+      # libluajit-5.1.so.2 at runtime unless LD_LIBRARY_PATH happens to be
+      # set - rpath bakes the path in instead, same reasoning as any
+      # dynamically-linked module against a non-default lib location.
+      - name: Configure and build the modules
+        run: |
+          workspace="$GITHUB_WORKSPACE"
+          export LUAJIT_LIB=$(pkg-config --variable=libdir luajit)
+          export LUAJIT_INC=$(pkg-config --variable=includedir luajit)
+          cd nginx-src
+          ./configure --with-compat \
+            --with-ld-opt="-Wl,-rpath,${LUAJIT_LIB}" \
+            --add-dynamic-module="$workspace/ngx_devel_kit" \
+            --add-dynamic-module="$workspace/lua-nginx-module"
+          make modules
+          mkdir -p "$workspace/built"
+          cp objs/ndk_http_module.so objs/ngx_http_lua_module.so "$workspace/built/"
+
+      # Real functional smoke test, not just "it configured and compiled":
+      # loads the freshly built modules into the REAL, distro-packaged
+      # jammy nginx binary (not the one just built from source) - that's
+      # the actual --with-compat ABI-compatibility claim being exercised,
+      # and it's what would actually catch a lua-nginx-module/lua-resty-
+      # core version mismatch (nginx refuses to start rather than silently
+      # running degraded). Upstream's own README calls this setup "tricky
+      # to get exactly right" - worth actually running, not just building.
+      - name: Smoke-test against the real distro nginx binary
+        run: |
+          sudo apt-get install -y --no-install-recommends nginx
+          dpkg-query -W -f='${Version}\n' nginx-core
+
+          sudo mkdir -p /usr/lib/nginx/modules
+          sudo cp built/ndk_http_module.so built/ngx_http_lua_module.so /usr/lib/nginx/modules/
+
+          sudo mkdir -p /usr/share/lua/5.1
+          sudo make -C lua-resty-core install PREFIX=/usr LUA_LIB_DIR=/usr/share/lua/5.1
+          sudo make -C lua-resty-lrucache install PREFIX=/usr LUA_LIB_DIR=/usr/share/lua/5.1
+
+          cat <<'EOF' | sudo tee /etc/nginx/nginx.conf
+          load_module modules/ndk_http_module.so;
+          load_module modules/ngx_http_lua_module.so;
+          events {}
+          http {
+              server {
+                  listen 8080;
+                  location /lua {
+                      default_type 'text/plain';
+                      content_by_lua_block {
+                          local core_ok = pcall(require, "resty.core")
+                          local lru_ok = pcall(require, "resty.lrucache")
+                          ngx.say("core=", tostring(core_ok), " lrucache=", tostring(lru_ok))
+                      }
+                  }
+              }
+          }
+          EOF
+
+          sudo nginx -t
+          sudo nginx
+          sleep 1
+          response="$(curl -sf http://127.0.0.1:8080/lua)"
+          echo "response: $response"
+          sudo nginx -s stop
+          [ "$response" = "core=true lrucache=true" ] || { echo "smoke test failed: unexpected response"; exit 1; }
+
+      # dpkg-deb --build directly, matching build-nginx-vts.yml's own
+      # reasoning: vozlt/nginx-module-vts and this bundle alike don't ship
+      # their own debian/ packaging, so nginx's own nginx_mod debhelper
+      # buildsystem doesn't apply.
+      #
+      # /usr/share/lua/5.1 for the two pure-Lua libraries, not a private
+      # path: this is Debian/Ubuntu's own standard Lua 5.1 module search
+      # path, already part of LuaJIT's compiled-in default package.path
+      # (confirmed: `luajit -e 'print(package.path)'` lists it on jammy
+      # already) - so no lua_package_path directive is needed anywhere,
+      # unlike a custom install location would need. Matches exactly where
+      # Ubuntu's own lua-resty-core package installs on noble/resolute.
+      #
+      # 49-/50- prefix on the two modules-enabled files: nginx's own
+      # `include modules-enabled/*.conf` glob loads in lexical order, and
+      # ngx_http_lua_module needs ndk_http_module loaded first.
+      - name: Package as a .deb
+        run: |
+          version="${{ inputs.lua_module_ref }}"
+          version="${version#v}"
+          pkg_version="${version}-${{ inputs.pkg_revision }}"
+          deb_name="nginx-module-lua_${pkg_version}_jammy_amd64.deb"
+
+          mkdir -p pkgroot/usr/lib/nginx/modules
+          mkdir -p pkgroot/etc/nginx/modules-enabled
+          mkdir -p pkgroot/usr/share/lua/5.1
+          mkdir -p pkgroot/DEBIAN
+
+          cp built/ndk_http_module.so built/ngx_http_lua_module.so pkgroot/usr/lib/nginx/modules/
+          echo 'load_module modules/ndk_http_module.so;' \
+            > pkgroot/etc/nginx/modules-enabled/49-mod-http-ndk.conf
+          echo 'load_module modules/ngx_http_lua_module.so;' \
+            > pkgroot/etc/nginx/modules-enabled/50-mod-http-lua.conf
+
+          make -C lua-resty-core install \
+            DESTDIR="$GITHUB_WORKSPACE/pkgroot" PREFIX=/usr LUA_LIB_DIR=/usr/share/lua/5.1
+          make -C lua-resty-lrucache install \
+            DESTDIR="$GITHUB_WORKSPACE/pkgroot" PREFIX=/usr LUA_LIB_DIR=/usr/share/lua/5.1
+
+          cat > pkgroot/DEBIAN/control <<EOF
+          Package: nginx-module-lua
+          Version: ${pkg_version}
+          Architecture: amd64
+          Maintainer: non7top <noreply@github.com>
+          Depends: nginx-core, libluajit-5.1-2
+          Section: httpd
+          Priority: optional
+          Description: nginx Lua scripting module (prebuilt, jammy)
+           Prebuilt openresty/lua-nginx-module ${{ inputs.lua_module_ref }} (+ ngx_devel_kit ${{ inputs.ndk_ref }}, lua-resty-core ${{ inputs.resty_core_ref }}, lua-resty-lrucache ${{ inputs.resty_lrucache_ref }}) for Ubuntu jammy, built via non7top/nginx-modules GitHub Actions.
+           .
+           noble/resolute get an equivalent from Ubuntu's own archive
+           (libnginx-mod-http-lua) instead - this package is jammy-only.
+          EOF
+
+          dpkg-deb --build --root-owner-group pkgroot "$deb_name"
+          dpkg-deb -I "$deb_name"
+          mkdir -p dist
+          mv "$deb_name" dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nginx-module-lua-jammy
+          path: dist/*.deb
+          retention-days: 7
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: sha256 of the built package
+        run: sha256sum dist/*.deb
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign the .deb (keyless)
+        run: |
+          for deb in dist/*.deb; do
+            cosign sign-blob --yes --bundle "$deb.cosign.bundle" "$deb"
+          done
+
+      - name: Publish as a GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ inputs.lua_module_ref }}"
+          version="${version#v}"
+          tag="nginx-module-lua-${version}-${{ inputs.pkg_revision }}"
+          gh release create "$tag" dist/*.deb dist/*.cosign.bundle \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "nginx-module-lua ${{ inputs.lua_module_ref }}-${{ inputs.pkg_revision }}" \
+            --notes "Prebuilt jammy-only .deb (ndk_devel_kit + lua-nginx-module + lua-resty-core + lua-resty-lrucache) - see README for why noble/resolute don't need this at all.
+
+          Each .deb has a matching .cosign.bundle - verify with:
+              cosign verify-blob --bundle FILE.deb.cosign.bundle \\
+                --certificate-identity-regexp 'https://github.com/${{ github.repository }}/.github/workflows/build-nginx-lua.yml@.*' \\
+                --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
+                FILE.deb
+
+          A real apt repo (sigstore-signed, no GPG) is also published on the apt-repo-lua branch - see the README's 'Installing via apt' section."
+
+  # Own branch (apt-repo-lua), deliberately NOT apt-repo: that branch is
+  # regenerated whole on every publish-apt-repo run (a force-push, not a
+  # merge), and build-nginx-vts.yml's own publish-apt-repo job already owns
+  # it - publishing here too would just make whichever workflow runs last
+  # silently wipe out the other module's packages. Flat layout (no
+  # codename-pattern), unlike vts's per-codename split: there's only one
+  # target (jammy) here, so there is nothing to disambiguate.
+  publish-apt-repo:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Fetch and verify apt-cosign-sign
+        id: apt-cosign-sign
+        uses: non7top/apt-cosign/.github/actions/fetch-apt-cosign-sign@v0.6.0
+        with:
+          version: '0.6.0'
+          github-token: ${{ github.token }}
+
+      - name: Stage, sign, and publish the apt repo
+        uses: non7top/apt-cosign/.github/actions/publish-apt-repo@v0.6.0
+        with:
+          sign-bin: ${{ steps.apt-cosign-sign.outputs.bin-path }}
+          origin: nginx-modules-lua
+          description: "nginx-module-lua prebuilt repo for Ubuntu jammy (sigstore-verified, no GPG signature - see README)"
+          repo-dir: apt-repo-lua
+          branch: apt-repo-lua
+          commit-message: "apt-repo-lua: nginx-module-lua ${{ inputs.lua_module_ref }}-${{ inputs.pkg_revision }}"
+          github-token: ${{ secrets.GITHUB_TOKEN }}
