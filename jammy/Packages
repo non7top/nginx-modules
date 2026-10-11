@@ -1,0 +1,15 @@
+Package: nginx-module-vts
+Version: 0.2.7-6+ubuntu22.04
+Architecture: amd64
+Maintainer: non7top <noreply@github.com>
+Depends: nginx (= 1.18.0-6ubuntu14.21)
+Filename: ./nginx-module-vts_0.2.7-6+ubuntu22.04_jammy_amd64.deb
+Size: 220282
+MD5sum: a6badc8741a00f3865c4b12565680a07
+SHA1: 21487d5c08ef52555b6ada21ac69a53b7d56db6a
+SHA256: c1e4567b041457adbf0e13a1a33c820a4e55a98038b06ffc2d01bbc12b37875a
+Section: httpd
+Priority: optional
+Description: nginx virtual host traffic status module (prebuilt, jammy)
+ Prebuilt vozlt/nginx-module-vts v0.2.7 for Ubuntu jammy, built via non7top/nginx-modules GitHub Actions.
+
