@@ -8,12 +8,14 @@ Compiling a module on every node it's deployed to works, but repeats the same bu
 
 ## How a module gets built
 
-Each module has its own workflow (currently just `nginx-module-vts`), triggered manually (`workflow_dispatch`) with the upstream module's git tag and a package revision to build. It's matrixed across the three OS releases the fleet actually runs, using the same build mechanism as the consuming Salt state does when it *does* still compile locally on a fresh clone:
+Each module has its own workflow (currently just `nginx-module-vts`), triggered manually (`workflow_dispatch`) with the upstream module's git tag and a package revision to build. A scheduled run also rebuilds (same upstream tag, revision +1) whenever an Ubuntu archive's nginx no longer matches the version the published package depends on; otherwise it builds nothing. It's matrixed across the three OS releases the fleet actually runs, using the same build mechanism as the consuming Salt state does when it *does* still compile locally on a fresh clone:
 
 - **jammy**: no `nginx-dev` package exists for it, so it builds against nginx.org's own upstream source (version-pinned + hash-verified) with `--with-compat`, relying on that flag's ABI-compatibility guarantee with the distro-patched binary.
 - **noble/resolute**: uses the `nginx-dev` package, which ships the exact matching nginx source tree plus the real build's own configure flags (`conf_flags`) - so the module always matches whatever `nginx-core` is actually installed on that release, with no separate version to track.
 
 The built `.so` is packaged directly with `dpkg-deb --build` (confirmed installable via `dpkg -i`/`apt remove`, shows correctly in `dpkg -l`) rather than through nginx's own `nginx_mod` debhelper buildsystem - that expects the module source to ship its own `debian/` packaging, which `vozlt/nginx-module-vts` doesn't. The module goes straight into `/etc/nginx/modules-enabled/` rather than the available+enabled symlink split real distro module packages use - that split exists so a module can be disabled without uninstalling it, which nothing here needs.
+
+Package versions are `<upstream>-<rev>+ubuntu<release>` (`+ubuntu22.04`, `+ubuntu24.04`, `+ubuntu26.04`), so they sort in release order and apt upgrades across an Ubuntu release upgrade. Each package has `Depends: nginx (= <archive nginx version at build time>)`, because a dynamic module only loads into the nginx it was built against. For jammy the module is compiled from nginx.org's source (see above) and that dependency pins the archive's nginx it is paired with.
 
 ## Verifying a release
 

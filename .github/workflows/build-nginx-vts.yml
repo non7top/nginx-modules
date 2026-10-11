@@ -1,12 +1,13 @@
 name: Build nginx-module-vts
 
-# Manual only - this only needs rebuilding when the pinned nginx-module-vts
-# version bumps, or when a target OS release's nginx epoch changes enough
-# that --with-compat no longer covers it (a new major/minor, not a routine
-# security point-release - see wr-salt-new's ispconfig3/vts.sls for why
-# that distinction matters). Not on every push: nothing here depends on
-# this repo's own code changing.
+# Manual, or on a schedule that rebuilds only when an Ubuntu archive's nginx
+# no longer matches the one the published package depends on: each package
+# pins nginx (= <exact version>), so any nginx update there (point-release
+# included) needs a new module build. Not on every push: nothing here
+# depends on this repo's own code changing.
 on:
+  schedule:
+    - cron: '17 */6 * * *'
   workflow_dispatch:
     inputs:
       vts_ref:
@@ -19,7 +20,57 @@ on:
         default: '1'
 
 jobs:
+  # Cheap gate (no builds): a dispatch always builds with its inputs. A
+  # scheduled run compares each release's newest nginx in the Ubuntu archive
+  # (Launchpad, release/security/updates pockets) with the nginx version the
+  # published apt-repo package depends on, and on a difference rebuilds the
+  # published upstream version with the package revision bumped.
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+      vts_ref: ${{ steps.decide.outputs.vts_ref }}
+      pkg_revision: ${{ steps.decide.outputs.pkg_revision }}
+    steps:
+      - name: Decide whether to build
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_VTS_REF: ${{ inputs.vts_ref }}
+          INPUT_PKG_REVISION: ${{ inputs.pkg_revision }}
+        run: |
+          if [ "$EVENT" = workflow_dispatch ]; then
+            printf 'build=true\nvts_ref=%s\npkg_revision=%s\n' \
+              "$INPUT_VTS_REF" "$INPUT_PKG_REVISION" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          build=false
+          published_version=
+          for codename in jammy noble resolute; do
+            archive=$(curl -fsS "https://api.launchpad.net/devel/ubuntu/+archive/primary?ws.op=getPublishedSources&source_name=nginx&exact_match=true&distro_series=https://api.launchpad.net/devel/ubuntu/${codename}&status=Published" \
+              | jq -r '.entries[] | select(.pocket == "Release" or .pocket == "Security" or .pocket == "Updates") | .source_package_version' \
+              | sort -V | tail -n1)
+            packages=$(curl -fsS "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/apt-repo/${codename}/Packages")
+            published_version=$(sed -n 's/^Version: //p' <<<"$packages")
+            built=$(sed -n 's/^Depends: nginx (= \(.*\))$/\1/p' <<<"$packages")
+            echo "${codename}: archive nginx '${archive}', published module built against '${built}'"
+            [ -n "$archive" ] || { echo "no archive nginx version for ${codename}"; exit 1; }
+            [ "$archive" = "$built" ] || build=true
+          done
+
+          if [ "$build" = true ]; then
+            # published_version is e.g. 0.2.7-4+ubuntu26.04: upstream 0.2.7, revision 4
+            upstream="${published_version%%-*}"
+            revision="${published_version#*-}"
+            revision="${revision%%+*}"
+            printf 'vts_ref=v%s\npkg_revision=%s\n' "$upstream" "$((revision + 1))" >> "$GITHUB_OUTPUT"
+          fi
+          echo "build=${build}" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
     strategy:
       matrix:
         include:
@@ -29,18 +80,21 @@ jobs:
           # binary, same reasoning as the noble/resolute path below.
           - runner: ubuntu-22.04
             codename: jammy
+            release: '22.04'
             nginx_version: '1.18.0'
             nginx_sha256: '4c373e7ab5bf91d34a4f11a0c9496561061ba5eee6020db272a17a7228d35f99'
           - runner: ubuntu-24.04
             codename: noble
+            release: '24.04'
           - runner: ubuntu-26.04
             codename: resolute
+            release: '26.04'
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Fetch and verify nginx-module-vts source
         run: |
           curl -fsSL -o vts.tar.gz \
-            "https://github.com/vozlt/nginx-module-vts/archive/refs/tags/${{ inputs.vts_ref }}.tar.gz"
+            "https://github.com/vozlt/nginx-module-vts/archive/refs/tags/${{ needs.check.outputs.vts_ref }}.tar.gz"
           sha256sum vts.tar.gz
           tar xzf vts.tar.gz
           mv nginx-module-vts-* nginx-module-vts
@@ -96,8 +150,15 @@ jobs:
           mkdir -p "$workspace/built"
           cp "$workspace/objs/ngx_http_vhost_traffic_status_module.so" "$workspace/built/"
 
-      - name: Report the nginx version this was actually built against
-        run: dpkg-query -W -f='${Version}\n' nginx-core
+      # Candidate == installed nginx-core on noble/resolute (just installed
+      # from the freshly updated lists); on jammy it's the archive version the
+      # nginx.org-source build is paired with.
+      - name: Record the archive nginx version this package depends on
+        run: |
+          nginx_pkg_version=$(apt-cache policy nginx-core | sed -n 's/^  Candidate: //p')
+          [ -n "$nginx_pkg_version" ] && [ "$nginx_pkg_version" != '(none)' ]
+          echo "NGINX_PKG_VERSION=${nginx_pkg_version}" >> "$GITHUB_ENV"
+          echo "$nginx_pkg_version"
 
       # dpkg-deb --build directly, not the full nginx_mod debhelper
       # buildsystem nginx's own source package uses for its packaged
@@ -115,9 +176,9 @@ jobs:
       # module is either installed and wanted, or not installed at all.
       - name: Package as a .deb
         run: |
-          version="${{ inputs.vts_ref }}"
+          version="${{ needs.check.outputs.vts_ref }}"
           version="${version#v}"
-          pkg_version="${version}-${{ inputs.pkg_revision }}"
+          pkg_version="${version}-${{ needs.check.outputs.pkg_revision }}+ubuntu${{ matrix.release }}"
           deb_name="nginx-module-vts_${pkg_version}_${{ matrix.codename }}_amd64.deb"
 
           mkdir -p pkgroot/usr/lib/nginx/modules
@@ -138,11 +199,11 @@ jobs:
           Version: ${pkg_version}
           Architecture: amd64
           Maintainer: non7top <noreply@github.com>
-          Depends: nginx-core
+          Depends: nginx (= ${NGINX_PKG_VERSION})
           Section: httpd
           Priority: optional
           Description: nginx virtual host traffic status module (prebuilt, ${{ matrix.codename }})
-           Prebuilt vozlt/nginx-module-vts ${{ inputs.vts_ref }} for Ubuntu ${{ matrix.codename }}, built via non7top/nginx-modules GitHub Actions.
+           Prebuilt vozlt/nginx-module-vts ${{ needs.check.outputs.vts_ref }} for Ubuntu ${{ matrix.codename }}, built via non7top/nginx-modules GitHub Actions.
           EOF
 
           dpkg-deb --build --root-owner-group pkgroot "$deb_name"
@@ -157,7 +218,7 @@ jobs:
           retention-days: 7
 
   release:
-    needs: build
+    needs: [check, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -188,12 +249,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          version="${{ inputs.vts_ref }}"
+          version="${{ needs.check.outputs.vts_ref }}"
           version="${version#v}"
-          tag="nginx-module-vts-${version}-${{ inputs.pkg_revision }}"
+          tag="nginx-module-vts-${version}-${{ needs.check.outputs.pkg_revision }}"
           gh release create "$tag" dist/*.deb dist/*.cosign.bundle \
             --repo "$GITHUB_REPOSITORY" \
-            --title "nginx-module-vts ${{ inputs.vts_ref }}-${{ inputs.pkg_revision }}" \
+            --title "nginx-module-vts ${{ needs.check.outputs.vts_ref }}-${{ needs.check.outputs.pkg_revision }}" \
             --notes "Prebuilt .deb for jammy/noble/resolute - see wr-salt-new's ispconfig3/vts.sls for how these get consumed (downloaded directly and installed via Salt's pkg.installed, pinned by sha256).
 
           Each .deb has a matching .cosign.bundle - verify with:
@@ -221,7 +282,7 @@ jobs:
   # this repo's per-codename case), so there's no reason to keep
   # maintaining a local copy of logic upstream now owns and tests.
   publish-apt-repo:
-    needs: build
+    needs: [check, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -259,5 +320,5 @@ jobs:
           codename-pattern: 's/_amd64\.deb$//; s/.*_//'
           origin: nginx-modules
           description: "nginx-module-vts prebuilt repo for Ubuntu %CODENAME% (sigstore-verified, no GPG signature - see README)"
-          commit-message: "apt-repo: nginx-module-vts ${{ inputs.vts_ref }}-${{ inputs.pkg_revision }}"
+          commit-message: "apt-repo: nginx-module-vts ${{ needs.check.outputs.vts_ref }}-${{ needs.check.outputs.pkg_revision }}"
           github-token: ${{ secrets.GITHUB_TOKEN }}
