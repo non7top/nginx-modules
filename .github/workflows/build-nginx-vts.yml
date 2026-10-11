@@ -303,9 +303,9 @@ jobs:
       # own release workflow identity, and extracts the binary.
       - name: Fetch and verify apt-cosign-sign
         id: apt-cosign-sign
-        uses: non7top/apt-cosign/.github/actions/fetch-apt-cosign-sign@v0.6.0
+        uses: non7top/apt-cosign/.github/actions/fetch-apt-cosign-sign@v0.8.0
         with:
-          version: '0.6.0'
+          version: '0.8.0'
           github-token: ${{ github.token }}
 
       # Stages a flat apt repo per OS codename (jammy/noble/resolute builds
@@ -314,7 +314,7 @@ jobs:
       # every InRelease/Packages/.deb with apt-cosign-sign, and
       # force-publishes to the apt-repo branch.
       - name: Stage, sign, and publish the apt repo
-        uses: non7top/apt-cosign/.github/actions/publish-apt-repo@v0.6.0
+        uses: non7top/apt-cosign/.github/actions/publish-apt-repo@v0.8.0
         with:
           sign-bin: ${{ steps.apt-cosign-sign.outputs.bin-path }}
           codename-pattern: 's/_amd64\.deb$//; s/.*_//'
