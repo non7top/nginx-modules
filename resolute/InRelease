@@ -1,0 +1,12 @@
+Origin: nginx-modules
+Label: nginx-modules
+Suite: stable
+Codename: resolute
+Architectures: amd64
+Components: main
+Description: nginx-module-vts prebuilt repo for Ubuntu resolute (sigstore-verified, no GPG signature - see README)
+Date: Mon, 02 Nov 2026 20:22:22 +0000
+SHA256:
+ 7648a4af33ee3ce48b266a943829e1144574a1294ab764fd6324858d80d2a208 615 Packages
+ 6141f1b8c3097a3464d85eb26993b22c5f24f9038e36d4c218af4b0a216a545b 424 Packages.gz
+ ac0918e307569e8653b5ae59a048f8df8dcfb3332a41ee48913ccaf1a1d52fdf 492 Packages.xz

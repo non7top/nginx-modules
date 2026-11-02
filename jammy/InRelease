@@ -1,0 +1,12 @@
+Origin: nginx-modules
+Label: nginx-modules
+Suite: stable
+Codename: jammy
+Architectures: amd64
+Components: main
+Description: nginx-module-vts prebuilt repo for Ubuntu jammy (sigstore-verified, no GPG signature - see README)
+Date: Mon, 02 Nov 2026 20:22:22 +0000
+SHA256:
+ 10c742aa1a753f196be66248aa3ef201a24c078def8930bce59a89130caef598 607 Packages
+ c99bea5f8f97d44815c053cfefd25138f9fa4ae3a1fe30a99481a62b16652af9 428 Packages.gz
+ a6e6fe1558fb6a5794eda734b511d16c7d21a704881d84bce2e960f580b7b644 488 Packages.xz

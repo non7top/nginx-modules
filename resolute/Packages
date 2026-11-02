@@ -1,0 +1,15 @@
+Package: nginx-module-vts
+Version: 0.2.7-8+ubuntu26.04
+Architecture: amd64
+Maintainer: non7top <noreply@github.com>
+Depends: nginx (= 1.28.3-2ubuntu1.12)
+Filename: ./nginx-module-vts_0.2.7-8+ubuntu26.04_resolute_amd64.deb
+Size: 227764
+MD5sum: 3ac42d5fdc558390d1f686d5ce0e3252
+SHA1: 243fe361362f52ae4761c8dbd56c635fcc058a4c
+SHA256: 22c8116430debf76529c13d85c249ada4f62589db4b880e393fad8c3b759ff1f
+Section: httpd
+Priority: optional
+Description: nginx virtual host traffic status module (prebuilt, resolute)
+ Prebuilt vozlt/nginx-module-vts v0.2.7 for Ubuntu resolute, built via non7top/nginx-modules GitHub Actions.
+
