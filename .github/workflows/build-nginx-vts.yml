@@ -48,10 +48,10 @@ jobs:
           build=false
           published_version=
           for codename in jammy noble resolute; do
-            archive=$(curl -fsS "https://api.launchpad.net/devel/ubuntu/+archive/primary?ws.op=getPublishedSources&source_name=nginx&exact_match=true&distro_series=https://api.launchpad.net/devel/ubuntu/${codename}&status=Published" \
+            archive=$(curl -fsS --retry 5 --retry-all-errors --retry-delay 10 --max-time 60 "https://api.launchpad.net/devel/ubuntu/+archive/primary?ws.op=getPublishedSources&source_name=nginx&exact_match=true&distro_series=https://api.launchpad.net/devel/ubuntu/${codename}&status=Published" \
               | jq -r '.entries[] | select(.pocket == "Release" or .pocket == "Security" or .pocket == "Updates") | .source_package_version' \
               | sort -V | tail -n1)
-            packages=$(curl -fsS "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/apt-repo/${codename}/Packages")
+            packages=$(curl -fsS --retry 5 --retry-all-errors --retry-delay 10 --max-time 60 "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/apt-repo/${codename}/Packages")
             published_version=$(sed -n 's/^Version: //p' <<<"$packages")
             built=$(sed -n 's/^Depends: nginx (= \(.*\))$/\1/p' <<<"$packages")
             echo "${codename}: archive nginx '${archive}', published module built against '${built}'"
