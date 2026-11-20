@@ -1,0 +1,15 @@
+Package: nginx-module-vts
+Version: 0.2.7-11+ubuntu24.04
+Architecture: amd64
+Maintainer: non7top <noreply@github.com>
+Depends: nginx (= 1.24.0-2ubuntu7.21)
+Filename: ./nginx-module-vts_0.2.7-11+ubuntu24.04_noble_amd64.deb
+Size: 218348
+MD5sum: c2ab39f7656004aaae70b5f1c5d49f48
+SHA1: 5d3afe3614d89b85400c7999c8e5b4cea023c8c8
+SHA256: 4ef13651c9bb05781ee7b680ad99ca3fd3fa0ad12616eb27c157cf6c9788a05a
+Section: httpd
+Priority: optional
+Description: nginx virtual host traffic status module (prebuilt, noble)
+ Prebuilt vozlt/nginx-module-vts v0.2.7 for Ubuntu noble, built via non7top/nginx-modules GitHub Actions.
+
