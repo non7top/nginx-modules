@@ -1,6 +1,6 @@
 # nginx-modules
 
-Prebuilt nginx dynamic modules for the wr0.ru fleet (jammy/22.04, noble/24.04, resolute/26.04), packaged as real `.deb`s and built via GitHub Actions. Consumed by [non7top/wr-salt-new](https://github.com/non7top/wr-salt-new) (`ispconfig3/vts.sls`), which downloads each release's `.deb` directly (pinned by sha256) and installs it via Salt's `pkg.installed`. A real apt repo is also published per release (see "Installing via apt" below), for anything that would rather add a source and run `apt-get install` than track sha256 pins by hand.
+Prebuilt nginx dynamic modules for the wr0.ru fleet (jammy/22.04, noble/24.04, resolute/26.04), packaged as real `.deb`s and built via GitHub Actions. Consumed by [non7top/wr-salt-new](https://github.com/non7top/wr-salt-new) (`ispconfig3/vts.sls`), which installs from the signed apt repo published on the `apt-repo` branch (see "Installing via apt" below). Every build is also kept as a GitHub Release (`.deb` plus `.cosign.bundle`) for manual download and audit, independent of apt.
 
 ## Why this exists
 
@@ -19,7 +19,7 @@ Package versions are `<upstream>-<rev>+ubuntu<release>` (`+ubuntu22.04`, `+ubunt
 
 ## Verifying a release
 
-Every `.deb` has a matching `.cosign.bundle` - a keyless Sigstore signature bound to this repo's own GitHub Actions workflow identity (no private key involved). Verify with:
+Releases are kept so a package can be downloaded and checked without apt or apt-cosign. Every `.deb` has a matching `.cosign.bundle` - a keyless Sigstore signature bound to this repo's own GitHub Actions workflow identity (no private key involved). Verify with:
 
 ```
 cosign verify-blob --bundle FILE.deb.cosign.bundle \
